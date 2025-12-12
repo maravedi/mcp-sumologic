@@ -25,8 +25,8 @@ server.tool(
   'search_sumologic',
   {
     query: z.string(),
-    from: z.string().optional(),
-    to: z.string().optional(),
+    from: z.string().optional().describe('ISO 8601 format'),
+    to: z.string().optional().describe('ISO 8601 format'),
   },
   async ({ query, from, to }) => {
     try {
