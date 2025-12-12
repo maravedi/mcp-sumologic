@@ -4,6 +4,7 @@ import { maskSensitiveInfo } from '@/utils/pii.js';
 
 export interface SearchResult {
   messages: any[];
+  records?: any[];
 }
 
 interface SumoAPIError {
@@ -53,83 +54,108 @@ export async function search(
     } while (status.state !== 'DONE GATHERING RESULTS');
 
     // Get results
-    const [messages] = await Promise.all([client.messages(id)]);
+    const promises: PromiseLike<any>[] = [client.messages(id)];
+    let getRecords = false;
+
+    if (status.recordCount > 0) {
+      getRecords = true;
+      promises.push(client.records(id));
+    }
+
+    const results = await Promise.all(promises);
+    const messages = results[0];
+    const records = getRecords ? results[1] : undefined;
 
     // Cleanup
     await client.delete(id);
 
-    // Ensure messages are properly formatted for JSON serialization and filter PII
-    const sanitizedMessages = messages.messages.map((message: any) => {
-      // Convert message.map to a plain object if it exists
-      if (message.map && typeof message.map === 'object') {
-        const plainMap: Record<string, string> = {};
-        Object.keys(message.map).forEach((key) => {
-          // Ensure values are strings and handle potential undefined values
-          const rawValue = message.map[key]?.toString() || '';
+    // Helper function to sanitize items (messages or records)
+    const sanitizeItems = (items: any[]) => {
+      return items.map((item: any) => {
+        // Convert item.map to a plain object if it exists
+        if (item.map && typeof item.map === 'object') {
+          const plainMap: Record<string, string> = {};
+          Object.keys(item.map).forEach((key) => {
+            // Ensure values are strings and handle potential undefined values
+            const rawValue = item.map[key]?.toString() || '';
 
-          // Only apply PII masking to _raw and response fields
-          if (key === '_raw' || key === 'response') {
-            plainMap[key] = maskSensitiveInfo(rawValue);
-          } else {
-            plainMap[key] = rawValue;
+            // Only apply PII masking to _raw and response fields
+            if (key === '_raw' || key === 'response') {
+              plainMap[key] = maskSensitiveInfo(rawValue);
+            } else {
+              plainMap[key] = rawValue;
+            }
+          });
+
+          // Also mask the _raw property if it exists at the top level
+          const maskedRaw = item._raw
+            ? maskSensitiveInfo(item._raw.toString())
+            : undefined;
+
+          return {
+            ...item,
+            map: plainMap,
+            _raw: maskedRaw,
+          };
+        }
+
+        // If item has a _raw property (contains raw log text)
+        if (item._raw && typeof item._raw === 'string') {
+          return {
+            ...item,
+            _raw: maskSensitiveInfo(item._raw),
+          };
+        }
+
+        // If item has a response property
+        if (item.response && typeof item.response === 'string') {
+          return {
+            ...item,
+            response: maskSensitiveInfo(item.response),
+          };
+        }
+
+        // If item is a string, don't apply PII masking
+        if (typeof item === 'string') {
+          return item;
+        }
+
+        // If item is an object, only filter _raw and response fields
+        if (typeof item === 'object' && item !== null) {
+          const result = { ...item };
+
+          if (result._raw && typeof result._raw === 'string') {
+            result._raw = maskSensitiveInfo(result._raw);
           }
-        });
 
-        // Also mask the _raw property if it exists at the top level
-        const maskedRaw = message._raw
-          ? maskSensitiveInfo(message._raw.toString())
-          : undefined;
+          if (result.response && typeof result.response === 'string') {
+            result.response = maskSensitiveInfo(result.response);
+          }
 
-        return {
-          ...message,
-          map: plainMap,
-          _raw: maskedRaw,
-        };
-      }
-
-      // If message has a _raw property (contains raw log text)
-      if (message._raw && typeof message._raw === 'string') {
-        return {
-          ...message,
-          _raw: maskSensitiveInfo(message._raw),
-        };
-      }
-
-      // If message has a response property
-      if (message.response && typeof message.response === 'string') {
-        return {
-          ...message,
-          response: maskSensitiveInfo(message.response),
-        };
-      }
-
-      // If message is a string, don't apply PII masking
-      if (typeof message === 'string') {
-        return message;
-      }
-
-      // If message is an object, only filter _raw and response fields
-      if (typeof message === 'object' && message !== null) {
-        const result = { ...message };
-
-        if (result._raw && typeof result._raw === 'string') {
-          result._raw = maskSensitiveInfo(result._raw);
+          return result;
         }
 
-        if (result.response && typeof result.response === 'string') {
-          result.response = maskSensitiveInfo(result.response);
-        }
+        // For other item formats, return as is
+        return item;
+      });
+    };
 
-        return result;
-      }
+    const sanitizedMessages = sanitizeItems(messages.messages);
 
-      // For other message formats, return as is
-      return message;
-    });
+    let sanitizedRecords;
+    if (records) {
+      sanitizedRecords = sanitizeItems(records.records);
+    }
 
-    return {
+    const result: SearchResult = {
       messages: sanitizedMessages,
     };
+
+    if (sanitizedRecords) {
+      result.records = sanitizedRecords;
+    }
+
+    return result;
   } catch (error) {
     return {
       messages: [],
